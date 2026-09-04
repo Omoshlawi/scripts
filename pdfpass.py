@@ -252,8 +252,8 @@ def main():
     if mode == "encrypt" and protected:
         die("%s is already password protected; use --mode change to replace "
             "the password, or --mode remove to strip it" % args.input)
-    if mode == "remove" and args.owner_password:
-        die("--owner-password makes no sense with --mode remove")
+    if mode == "remove" and (args.owner_password or args.no_print or args.no_copy):
+        die("--owner-password/--no-print/--no-copy make no sense with --mode remove")
 
     if not encrypted:
         if mode == "remove":
