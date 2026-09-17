@@ -9,6 +9,7 @@ page in [`docs/`](docs/).
 | Script | What it does | Docs |
 | --- | --- | --- |
 | [`pdfpass.py`](pdfpass.py) | Add, change, or remove a PDF's open password | [docs/pdfpass.md](docs/pdfpass.md) |
+| [`mocklocation.py`](mocklocation.py) | Bridge a phone's (spoofed) GPS location to MQTT over adb | [docs/mocklocation.md](docs/mocklocation.md) |
 
 ## Requirements
 
