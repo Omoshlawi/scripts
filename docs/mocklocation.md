@@ -36,6 +36,7 @@ Only the first invocation is slow; after that the script re-execs into `.venv/` 
 | `--provider {any,fused,gps,network,passive}` | Which provider to follow. Default `any`, preferring `fused`, then `gps`. |
 | `--source {dumpsys,logcat}` | Where coordinates come from. See **Notes**. Default `dumpsys`. |
 | `--qos {0,1,2}` | MQTT QoS. Default `0`. |
+| `--time-format {ms,seconds,iso}` | Shape of the time fields. Default `ms`. See **Output**. |
 | `--retain` | Retain each message, so a late subscriber gets the last position at once. |
 | `-u`, `--username USER` | MQTT username. Falls back to `$MQTT_USERNAME`. |
 | `--password [PASS]` | MQTT password. Pass the flag with no value for a hidden prompt. Falls back to `$MQTT_PASSWORD`. |
@@ -84,16 +85,40 @@ bridge warns rather than going quiet.
 One JSON object per new fix:
 
 ```json
-{"lat": -1.286389, "lon": 36.817223, "alt": 1661.0, "accuracy": 5.0,
+{"lat": -1.286389, "lng": 36.817223, "alt": 1661.0, "accuracy": 5.0,
  "speed": 12.4, "bearing": 87.3, "provider": "fused",
- "device": "FAKE123", "ts": 1789564800.123, "time": "2026-09-17T09:20:00Z"}
+ "device": "1197225443008202", "timestamp": 1789564800123}
 ```
 
-`lat` and `lon` are always present. `speed` (m/s) and `bearing` (degrees) come from the
+`lat`, `lng` and `timestamp` are always present. `speed` (m/s) and `bearing` (degrees) come from the
 provider when it supplies them, and are otherwise derived from the previous fix — so
 they are absent on the first message, and while the device sits still. `alt`, `accuracy`
-and `provider` are passed through when the device reports them. `ts` is epoch seconds,
-`time` the same moment as ISO-8601 UTC.
+and `provider` are passed through when the device reports them.
+
+### The timestamp field
+
+`--time-format` changes what `timestamp` holds, and nothing else — the set of keys is
+the same in every mode:
+
+| Mode | `timestamp` | Example |
+| --- | --- | --- |
+| `ms` (default) | epoch **milliseconds**, integer | `1789564800123` |
+| `seconds` | epoch **seconds**, float | `1789564800.123` |
+| `iso` | ISO-8601 UTC **string**, milliseconds included | `"2026-09-17T09:20:00.123Z"` |
+
+`ms` is exactly what JavaScript's `Date.now()` produces, so a Node consumer needs no
+conversion:
+
+```js
+const fix = JSON.parse(message.toString());
+const when = new Date(fix.timestamp);        // a real Date, no maths needed
+const latency = Date.now() - fix.timestamp;  // milliseconds behind the bridge
+```
+
+`new Date()` also parses the `iso` form correctly, so both of those modes work with that
+snippet unchanged. `seconds` does not — that same code reads the value as 20 January
+1970. It is the right mode only for a consumer that expects Unix seconds (Python's
+`time.time()`, `datetime.fromtimestamp`, most MQTT dashboards) and scales it itself.
 
 A message is published when the *position* changes, not on every poll: a parked device
 publishes once and then goes quiet.
@@ -104,8 +129,8 @@ publishes once and then goes quiet.
 $ ./mocklocation.py -t fleet/car1/position -v
 FAKE123 -> localhost:1883 fleet/car1/position
 connected to broker (Success)
-fleet/car1/position {"lat": -1.286299, "lon": 36.817343, ..., "provider": "fused"}
-fleet/car1/position {"lat": -1.286209, "lon": 36.817463, "speed": 54.68, "bearing": 53.1, ...}
+fleet/car1/position {"lat": -1.286299, "lng": 36.817343, ..., "timestamp": 1789564800123}
+fleet/car1/position {"lat": -1.286209, "lng": 36.817463, "speed": 54.68, "bearing": 53.1, ...}
 ^C
 published 2 fixes
 
@@ -126,8 +151,10 @@ Watch it from the other side with `mosquitto_sub -h localhost -t 'fleet/#' -v`.
 - Speed and bearing are derived using the device's own elapsed-time clock (`et=` in
   `dumpsys`), not the host's, so two fixes arriving in the same millisecond can't
   produce a warp-speed reading.
-- Timestamps are host time, not device time. If the phone's clock is skewed, `ts`
-  still reflects when the bridge saw the fix.
+- Timestamps are host time, not device time: `timestamp` is the moment the bridge read
+  the fix, not the moment the phone produced it, so a skewed phone clock can't distort
+  it. That is also what makes `Date.now() - fix.timestamp` a fair measure of how far
+  behind your consumer is running.
 - Nothing is encrypted unless you pass `--tls`: with a plain connection the credentials
   and every coordinate cross the network in the clear. Fine on a test LAN, not beyond it.
 - A password given as `--password s3cret` is visible in your shell history and in `ps`

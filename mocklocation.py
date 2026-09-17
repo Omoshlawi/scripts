@@ -237,9 +237,26 @@ def initial_bearing(lat1, lon1, lat2, lon2):
     return (math.degrees(math.atan2(y, x)) + 360) % 360
 
 
-def build_payload(fix, previous, device_id, now):
+def epoch_ms(now):
+    """Milliseconds since the epoch -- what JavaScript's Date.now() returns."""
+    return int(round(now * 1000))
+
+
+def iso(now):
+    """ISO-8601 UTC with milliseconds.
+
+    Built from the same rounded millisecond as the epoch formats, using integer
+    arithmetic for the fraction: rounding one and truncating the other put them
+    1 ms apart whenever the microseconds landed above .5.
+    """
+    millis = epoch_ms(now)
+    stamp = datetime.datetime.fromtimestamp(millis // 1000, datetime.timezone.utc)
+    return stamp.strftime("%Y-%m-%dT%H:%M:%S") + ".%03dZ" % (millis % 1000)
+
+
+def build_payload(fix, previous, device_id, now, time_format="ms"):
     """Flat JSON message: the fix, plus speed/bearing derived when missing."""
-    payload = {"lat": round(fix["lat"], 7), "lon": round(fix["lon"], 7)}
+    payload = {"lat": round(fix["lat"], 7), "lng": round(fix["lon"], 7)}
 
     if "alt" in fix:
         payload["alt"] = fix["alt"]
@@ -270,9 +287,14 @@ def build_payload(fix, previous, device_id, now):
 
     payload["provider"] = fix["provider"]
     payload["device"] = device_id
-    payload["ts"] = round(now, 3)
-    payload["time"] = (datetime.datetime.utcfromtimestamp(now)
-                       .strftime("%Y-%m-%dT%H:%M:%SZ"))
+    if time_format == "ms":
+        # What Date.now() gives you, so new Date(msg.timestamp) is all the far
+        # side needs.
+        payload["timestamp"] = epoch_ms(now)
+    elif time_format == "seconds":
+        payload["timestamp"] = round(now, 3)
+    else:
+        payload["timestamp"] = iso(now)
     return payload
 
 
@@ -510,6 +532,12 @@ def main():
                              "logs its coordinates")
     parser.add_argument("--qos", type=int, default=0, choices=[0, 1, 2],
                         help="MQTT QoS (default: 0)")
+    parser.add_argument("--time-format", default="ms",
+                        choices=["ms", "seconds", "iso"],
+                        help="what the payload's timestamp field holds -- ms: "
+                             "epoch milliseconds, matching JavaScript's "
+                             "Date.now() (default); seconds: epoch seconds; "
+                             "iso: an ISO-8601 UTC string")
     parser.add_argument("--retain", action="store_true",
                         help="retain each message so late subscribers get the "
                              "last position immediately")
@@ -575,7 +603,8 @@ def main():
         """Publish a fix and remember it for the next speed/bearing estimate."""
         nonlocal previous, count
         now = time.time()
-        publisher.publish(build_payload(fix, previous, device_id, now))
+        publisher.publish(build_payload(fix, previous, device_id, now,
+                                        args.time_format))
         previous = {"lat": fix["lat"], "lon": fix["lon"], "at": now,
                     "et_ms": fix.get("et_ms")}
         count += 1
