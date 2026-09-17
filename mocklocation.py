@@ -9,6 +9,10 @@ flat JSON message.
 
 Nothing is installed on the phone: this only needs USB debugging, and the mock
 app selected under Developer options -> Select mock location app.
+
+Security note: a password passed as --password ends up in your shell history
+and in `ps` output. Pass --password with no value to be prompted for it
+instead, or put it in MQTT_PASSWORD.
 """
 
 import os
@@ -64,12 +68,14 @@ except ImportError:
 
 import argparse
 import datetime
+import getpass
 import json
 import math
 import re
 import shutil
 import signal
 import subprocess
+import threading
 import time
 
 
@@ -90,6 +96,10 @@ PROVIDER_RANK = {"fused": 0, "gps": 1, "network": 2, "passive": 3}
 STALE_AFTER = 10.0   # seconds without a new fix before we say something
 MIN_MOVE = 0.5       # metres; below this we don't bother deriving speed
 MAX_SPEED = 1000.0   # m/s; anything faster came from a bogus time delta
+CONNECT_TIMEOUT = 10.0  # seconds to wait for the broker's CONNACK
+
+INTERACTIVE = sys.stdin.isatty()
+PROMPT_FOR_IT = "\0prompt"  # sentinel for `--password` with no value
 
 
 def die(message, code=1):
@@ -98,6 +108,28 @@ def die(message, code=1):
 
 def warn(message):
     print("warning: %s" % message, file=sys.stderr)
+
+
+def need_tty(what):
+    """Fail loudly instead of hanging when there is no tty to prompt on."""
+    if not INTERACTIVE:
+        die("no %s given and stdin is not a terminal, so I can't ask for it" % what)
+
+
+def resolve_credentials(args):
+    """Settle username/password from flags, then the environment, then a prompt."""
+    args.username = args.username or os.environ.get("MQTT_USERNAME")
+
+    if args.password == PROMPT_FOR_IT:
+        need_tty("--password")
+        args.password = getpass.getpass(
+            "Password for %s: " % (args.username or "the broker"))
+    elif args.password is None:
+        args.password = os.environ.get("MQTT_PASSWORD")
+
+    # MQTT 3.1.1 has no way to send a password without a username.
+    if args.password and not args.username:
+        die("a --password needs a --username (or set MQTT_USERNAME)")
 
 
 def adb_devices():
@@ -356,6 +388,10 @@ class Publisher(object):
         self.verbose = args.verbose
         self.status_topic = args.status_topic
         self.client = None
+        self.closing = False
+        self.established = False
+        self.connected = threading.Event()
+        self.reason = None
         if args.dry_run:
             return
 
@@ -369,18 +405,55 @@ class Publisher(object):
         if self.status_topic:
             self.client.will_set(self.status_topic, "offline", qos=1, retain=True)
         self.client.reconnect_delay_set(min_delay=1, max_delay=30)
-        if self.verbose:
-            self.client.on_connect = lambda c, u, f, rc, p=None: print(
-                "connected to broker (%s)" % rc, file=sys.stderr)
-            self.client.on_disconnect = lambda c, u, f, rc=None, p=None: print(
-                "disconnected from broker (%s)" % rc, file=sys.stderr)
+        self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
         try:
             self.client.connect(args.broker, args.port, keepalive=30)
         except OSError as exc:
             die("could not connect to %s:%d -- %s" % (args.broker, args.port, exc))
         self.client.loop_start()
+
+        # connect() only finishes the TCP handshake -- a refused login arrives
+        # later, as a CONNACK. Without waiting for it we'd cheerfully stream
+        # fixes into a connection the broker has already thrown away.
+        if not self.connected.wait(CONNECT_TIMEOUT):
+            self.client.loop_stop()
+            die("no response from %s:%d after %gs -- is that an MQTT broker?"
+                % (args.broker, args.port, CONNECT_TIMEOUT))
+        if self.reason is not None:
+            self.client.loop_stop()
+            message = "broker rejected the connection: %s" % self.reason
+            if self._looks_like_auth(self.reason):
+                message += ("\n       check --username/--password "
+                            "(or MQTT_USERNAME/MQTT_PASSWORD)")
+            die(message)
+
+        self.established = True
         if self.status_topic:
             self.client.publish(self.status_topic, "online", qos=1, retain=True)
+
+    @staticmethod
+    def _looks_like_auth(reason):
+        text = str(reason).lower()
+        return "user name" in text or "password" in text or "auth" in text
+
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        # paho hands v3 return codes back as ReasonCodes too, so one path does.
+        failed = getattr(reason_code, "is_failure", reason_code != 0)
+        self.reason = reason_code if failed else None
+        if self.verbose:
+            print("connected to broker (%s)" % reason_code, file=sys.stderr)
+        self.connected.set()
+
+    def _on_disconnect(self, client, userdata, flags=None, reason_code=None,
+                       properties=None):
+        if self.closing or not self.established:
+            # Before the CONNACK check has passed, the caller is about to print
+            # a far better message than this one -- don't talk over it.
+            return
+        # paho reconnects underneath us, which is right -- but say so, or a
+        # broker that drops us mid-route looks like the phone stopping.
+        warn("disconnected from broker (%s); retrying" % reason_code)
 
     def publish(self, payload):
         line = json.dumps(payload)
@@ -394,6 +467,7 @@ class Publisher(object):
     def close(self):
         if self.client is None:
             return
+        self.closing = True
         if self.status_topic:
             self.client.publish(self.status_topic, "offline", qos=1,
                                 retain=True).wait_for_publish(timeout=2)
@@ -408,7 +482,10 @@ def main():
                     "changes -- including one spoofed by Fake GPS Location.",
         epilog="The phone needs USB debugging on, and the spoofing app selected "
                "under Developer options -> Select mock location app. Use "
-               "--dry-run first to check the phone side without a broker.",
+               "--dry-run first to check the phone side without a broker. "
+               "A password given as a flag lands in your shell history and in "
+               "ps output; pass --password with no value for a hidden prompt, "
+               "or set MQTT_PASSWORD.",
     )
     parser.add_argument("-s", "--device", metavar="SERIAL",
                         help="adb serial; only needed with several devices attached")
@@ -436,8 +513,12 @@ def main():
     parser.add_argument("--retain", action="store_true",
                         help="retain each message so late subscribers get the "
                              "last position immediately")
-    parser.add_argument("--username", help="MQTT username")
-    parser.add_argument("--password", help="MQTT password")
+    parser.add_argument("-u", "--username",
+                        help="MQTT username (or set MQTT_USERNAME)")
+    parser.add_argument("--password", nargs="?", const=PROMPT_FOR_IT,
+                        metavar="PASS",
+                        help="MQTT password; pass the flag with no value to be "
+                             "prompted for it, or set MQTT_PASSWORD")
     parser.add_argument("--tls", action="store_true",
                         help="connect over TLS (port is usually 8883)")
     parser.add_argument("--client-id", help="MQTT client id (default: mocklocation-PID)")
@@ -467,6 +548,9 @@ def main():
 
     if args.interval <= 0:
         die("--interval must be positive")
+
+    if not args.dry_run:
+        resolve_credentials(args)
 
     if args.from_file:
         serial = "file"

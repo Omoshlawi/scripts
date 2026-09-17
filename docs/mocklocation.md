@@ -37,7 +37,8 @@ Only the first invocation is slow; after that the script re-execs into `.venv/` 
 | `--source {dumpsys,logcat}` | Where coordinates come from. See **Notes**. Default `dumpsys`. |
 | `--qos {0,1,2}` | MQTT QoS. Default `0`. |
 | `--retain` | Retain each message, so a late subscriber gets the last position at once. |
-| `--username U`, `--password P` | Broker credentials. |
+| `-u`, `--username USER` | MQTT username. Falls back to `$MQTT_USERNAME`. |
+| `--password [PASS]` | MQTT password. Pass the flag with no value for a hidden prompt. Falls back to `$MQTT_PASSWORD`. |
 | `--tls` | Connect over TLS. |
 | `--client-id ID` | MQTT client id. Default `mocklocation-PID`. |
 | `--id NAME` | Publish as this name instead of the adb serial. |
@@ -47,6 +48,36 @@ Only the first invocation is slow; after that the script re-execs into `.venv/` 
 | `--list-devices` | List attached devices and exit. |
 | `-v`, `--verbose` | Log every message and broker event to stderr. |
 | `-h`, `--help` | Usage. |
+
+## Authentication
+
+If your broker requires a login (Mosquitto with `allow_anonymous false` and a
+`password_file`, say), there are three ways to give it one. A flag wins over the
+environment, and the environment wins over nothing:
+
+```sh
+./mocklocation.py -u testapp --password s3cret       # visible in ps and shell history
+./mocklocation.py -u testapp --password              # hidden prompt
+MQTT_USERNAME=testapp MQTT_PASSWORD=s3cret ./mocklocation.py   # nothing on the command line
+```
+
+```
+$ ./mocklocation.py -u testapp --password
+Password for testapp:
+```
+
+A wrong login is reported and exits 1 rather than being swallowed — the bridge waits
+for the broker's CONNACK before it starts streaming, so it can't sit there publishing
+into a connection the broker already refused:
+
+```
+error: broker rejected the connection: Bad user name or password
+       check --username/--password (or MQTT_USERNAME/MQTT_PASSWORD)
+```
+
+MQTT has no way to send a password without a username, so `--password` on its own is
+rejected. If the broker drops the connection later, paho reconnects underneath and the
+bridge warns rather than going quiet.
 
 ## Output
 
@@ -97,8 +128,10 @@ Watch it from the other side with `mosquitto_sub -h localhost -t 'fleet/#' -v`.
   produce a warp-speed reading.
 - Timestamps are host time, not device time. If the phone's clock is skewed, `ts`
   still reflects when the bridge saw the fix.
-- Nothing is encrypted unless you pass `--tls`, and `--password` lands in your shell
-  history and in `ps` output.
+- Nothing is encrypted unless you pass `--tls`: with a plain connection the credentials
+  and every coordinate cross the network in the clear. Fine on a test LAN, not beyond it.
+- A password given as `--password s3cret` is visible in your shell history and in `ps`
+  output. Use the bare `--password` prompt or `MQTT_PASSWORD` instead.
 
 ## Exit codes
 
@@ -124,6 +157,21 @@ hasn't been started yet.
 
 **`warning: no new fix for 10s -- is the route still running?`** — the position stopped
 changing. Expected when the route ends or is paused; the bridge keeps waiting.
+
+**`error: broker rejected the connection: Bad user name or password`** — the broker
+refused the login. Check the credentials, and that the user exists in the broker's
+password file.
+
+**`error: broker rejected the connection: Not authorized`** — the login was accepted but
+the broker won't let this client in; usually an ACL that doesn't cover the topic or
+client id. Try `--client-id` and check the broker's ACL file.
+
+**`error: no response from host:1883 after 10s -- is that an MQTT broker?`** — something
+is listening on that port but never sent a CONNACK. Usually the wrong port, or a TLS
+listener being spoken to in plaintext (add `--tls`).
+
+**`error: a --password needs a --username`** — MQTT can't send a password on its own.
+Add `-u USER` or set `MQTT_USERNAME`.
 
 **`error: could not connect to host:1883 -- Connection refused`** — no broker there.
 Start one (`brew install mosquitto && mosquitto -p 1883`) or point `-b`/`-P` elsewhere.
