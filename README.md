@@ -10,6 +10,7 @@ page in [`docs/`](docs/).
 | --- | --- | --- |
 | [`pdfpass.py`](pdfpass.py) | Add, change, or remove a PDF's open password | [docs/pdfpass.md](docs/pdfpass.md) |
 | [`mocklocation.py`](mocklocation.py) | Bridge a phone's (spoofed) GPS location to MQTT over adb | [docs/mocklocation.md](docs/mocklocation.md) |
+| [`extractaudio.py`](extractaudio.py) | Extract a video's audio track, losslessly or converted | [docs/extractaudio.md](docs/extractaudio.md) |
 
 ## Requirements
 
@@ -18,6 +19,8 @@ macOS or Linux with Python 3 (this machine uses the system Python, 3.9.6 at
 creates its own `.venv/` on first run and re-executes itself inside it, so the first
 invocation is slower and every one after that is instant. `requirements.txt` records
 the resulting pins.
+
+`extractaudio.py` also needs `ffmpeg`/`ffprobe` on `PATH` (`brew install ffmpeg`).
 
 ## Layout
 
